@@ -3,8 +3,9 @@ import asyncio
 import logging
 import tempfile
 import shutil
+import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -28,6 +29,20 @@ if not TOKEN:
 # Store user sessions
 user_sessions: Dict[int, Dict] = {}
 
+# User agent rotation to avoid bot detection
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+]
+
+def get_user_session(user_id: int) -> Optional[Dict]:
+    """Get user session or create if not exists"""
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {}
+    return user_sessions[user_id]
+
 # Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -38,13 +53,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Send me a link (YouTube, Instagram, TikTok, etc.)\n"
         "2. I'll show available formats\n"
         "3. Choose your preferred quality\n\n"
-        "🔍 **Supported sites:** YouTube, Instagram, TikTok, Twitter, Facebook, and 1000+ more!\n\n"
+        "⚠️ **Note about YouTube:**\n"
+        "• Some YouTube videos may require login\n"
+        "• Use /cookies command if you have login issues\n\n"
         "⚙️ Commands:\n"
         "/start - Show this message\n"
         "/help - Get help\n"
+        "/cookies - Info about YouTube login issues\n"
         "/cancel - Cancel current operation"
     )
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
+
+# Cookies info command
+async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cookies_info = (
+        "🍪 **YouTube Login/Cookies Issue**\n\n"
+        "Some YouTube videos require login or show 'Sign in to confirm you're not a bot'.\n\n"
+        "**Solutions:**\n"
+        "1. **Try again later** - Sometimes it's temporary\n"
+        "2. **Use different quality** - Lower qualities often work\n"
+        "3. **Try another video** - Not all videos have this issue\n"
+        "4. **Use alternative sites** - Many videos are on multiple platforms\n\n"
+        "**For developers:**\n"
+        "You can use cookies with yt-dlp using:\n"
+        "`--cookies-from-browser chrome`\n\n"
+        "**Note:** This bot runs on a server and cannot use browser cookies."
+    )
+    await update.message.reply_text(cookies_info, parse_mode='Markdown')
 
 # Help command
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -56,11 +91,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ **Important Notes:**\n"
         "• Large files may take time to upload\n"
         "• Some sites have download restrictions\n"
-        "• Maximum file size: 2GB (Telegram limit)\n\n"
+        "• Maximum file size: 50MB (Telegram free limit)\n"
+        "• YouTube may block some videos (use /cookies for info)\n\n"
         "❓ **Having issues?**\n"
         "• Make sure the link is accessible\n"
         "• Try different quality options\n"
-        "• Some videos may be age-restricted"
+        "• Some videos may be age-restricted\n"
+        "• Try the 'Fastest (Lowest Quality)' option"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -71,186 +108,272 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_sessions[user_id]
     await update.message.reply_text("✅ Operation cancelled.")
 
-# Handle URL messages
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-    user_id = update.effective_user.id
-    
-    # Validate URL
-    if not (url.startswith('http://') or url.startswith('https://')):
-        await update.message.reply_text("❌ Please send a valid URL starting with http:// or https://")
-        return
-    
-    # Check if URL is from supported sites
-    blacklisted_domains = ['porn', 'xxx', 'adult']  # Add more if needed
-    if any(domain in url.lower() for domain in blacklisted_domains):
-        await update.message.reply_text("❌ This content is not supported.")
-        return
-    
+async def extract_info(url: str) -> Optional[Dict]:
+    """Extract video/audio information using yt-dlp with anti-bot measures"""
     try:
-        # Show processing message
-        processing_msg = await update.message.reply_text("🔍 Extracting video information...")
+        import random
+        user_agent = random.choice(USER_AGENTS)
         
-        # Extract video info using yt-dlp
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
+            'user_agent': user_agent,
+            'referer': 'https://www.google.com/',
+            # Try to avoid bot detection
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['hls', 'dash'],
+                }
+            },
+            # Retry on failure
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True,
+            # Throttle to appear more human-like
+            'sleep_interval_requests': 1,
+            'sleep_interval': 5,
+            'max_sleep_interval': 10,
+            # Avoid age-restricted content issues
+            'ignoreerrors': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
+            # If extraction failed, try with simpler options
             if not info:
-                await processing_msg.edit_text("❌ Could not extract video information.")
-                return
+                logger.info("First extraction failed, trying simpler options...")
+                simpler_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': True,
+                }
+                with yt_dlp.YoutubeDL(simpler_opts) as ydl_simple:
+                    info = ydl_simple.extract_info(url, download=False)
             
-            # Store info in user session
-            user_sessions[user_id] = {
-                'url': url,
-                'info': info,
-                'last_message_id': processing_msg.message_id
-            }
-            
-            # Get available formats
-            formats = info.get('formats', [])
-            
-            if not formats:
-                # If no formats, try to get audio only
-                await show_audio_options(update, context, info)
-                return
-            
-            # Prepare format options
-            video_formats = []
-            audio_formats = []
-            
-            for f in formats:
-                format_id = f.get('format_id')
-                ext = f.get('ext', 'unknown')
-                filesize = f.get('filesize') or f.get('filesize_approx')
-                
-                # Skip problematic formats
-                if not format_id or ext == 'unknown':
-                    continue
-                
-                # Video formats
-                if f.get('vcodec') != 'none':
-                    height = f.get('height', 0)
-                    fps = f.get('fps', 0)
-                    quality = f"{height}p"
-                    if fps and fps > 30:
-                        quality += f"@{int(fps)}fps"
-                    
-                    # Get size in MB
-                    size_mb = round(filesize / (1024 * 1024), 1) if filesize else '?'
-                    
-                    video_formats.append({
-                        'id': format_id,
-                        'quality': quality,
-                        'ext': ext,
-                        'size': size_mb,
-                        'note': f.get('format_note', ''),
-                        'vcodec': f.get('vcodec'),
-                        'acodec': f.get('acodec')
-                    })
-                
-                # Audio only formats
-                elif f.get('acodec') != 'none' and f.get('vcodec') == 'none':
-                    abr = f.get('abr', 0)
-                    audio_quality = f"{abr}kbps" if abr else "audio"
-                    size_mb = round(filesize / (1024 * 1024), 1) if filesize else '?'
-                    
-                    audio_formats.append({
-                        'id': format_id,
-                        'quality': audio_quality,
-                        'ext': ext,
-                        'size': size_mb,
-                        'acodec': f.get('acodec')
-                    })
-            
-            # Remove duplicates and sort
-            video_formats = sorted(
-                list({v['id']: v for v in video_formats}.values()),
-                key=lambda x: int(x['quality'].replace('p', '').split('@')[0]) if x['quality'].replace('p', '').split('@')[0].isdigit() else 0,
-                reverse=True
-            )
-            
-            audio_formats = sorted(
-                list({a['id']: a for a in audio_formats}.values()),
-                key=lambda x: int(x['quality'].replace('kbps', '')) if x['quality'].replace('kbps', '').isdigit() else 0,
-                reverse=True
-            )
-            
-            # Create keyboard
-            keyboard = []
-            
-            # Add video options
-            if video_formats:
-                keyboard.append([InlineKeyboardButton("📹 Video Formats", callback_data='header_video')])
-                for fmt in video_formats[:8]:  # Limit to 8 formats
-                    text = f"🎬 {fmt['quality']} ({fmt['ext'].upper()})"
-                    if fmt['size'] != '?':
-                        text += f" [{fmt['size']}MB]"
-                    keyboard.append([InlineKeyboardButton(text, callback_data=f"v_{fmt['id']}")])
-            
-            # Add audio options
-            if audio_formats:
-                keyboard.append([InlineKeyboardButton("🎵 Audio Only", callback_data='header_audio')])
-                for fmt in audio_formats[:6]:  # Limit to 6 formats
-                    text = f"🎵 {fmt['quality']} ({fmt['ext'].upper()})"
-                    if fmt['size'] != '?':
-                        text += f" [{fmt['size']}MB]"
-                    keyboard.append([InlineKeyboardButton(text, callback_data=f"a_{fmt['id']}")])
-            
-            # Add cancel button
-            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data='cancel')])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Prepare message
-            title = info.get('title', 'Unknown Title')[:100]
-            duration = info.get('duration', 0)
-            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown"
-            
-            message = (
-                f"🎬 **{title}**\n"
-                f"⏱ Duration: {duration_str}\n"
-                f"📊 Available formats:\n\n"
-                f"👇 **Select a format:**"
-            )
-            
-            await processing_msg.edit_text(message, reply_markup=reply_markup, parse_mode='Markdown')
-            
+            return info
     except yt_dlp.utils.DownloadError as e:
+        logger.error(f"YouTube download error: {e}")
+        # Check if it's a bot detection error
         error_msg = str(e)
-        if 'Private video' in error_msg:
-            await update.message.reply_text("❌ This video is private.")
-        elif 'Members only' in error_msg:
-            await update.message.reply_text("❌ This video is for members only.")
-        elif 'Content warning' in error_msg:
-            await update.message.reply_text("❌ Age-restricted content. Please login on YouTube first.")
+        if "Sign in to confirm" in error_msg or "confirm you're not a bot" in error_msg:
+            raise Exception("youtube_bot_detection")
+        elif "Private video" in error_msg:
+            raise Exception("youtube_private")
+        elif "Members only" in error_msg:
+            raise Exception("youtube_members_only")
+        elif "age restricted" in error_msg.lower():
+            raise Exception("youtube_age_restricted")
         else:
-            await update.message.reply_text(f"❌ Error: {error_msg[:200]}")
+            raise
     except Exception as e:
-        logger.error(f"Error processing URL: {e}")
-        await update.message.reply_text("❌ An error occurred while processing the URL.")
+        logger.error(f"Error extracting info: {e}")
+        raise
 
-# Show audio options for audio-only content
-async def show_audio_options(update: Update, context: ContextTypes.DEFAULT_TYPE, info: Dict):
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
     user_id = update.effective_user.id
     
-    # Store basic info for audio download
-    user_sessions[user_id] = {
-        'url': info.get('webpage_url', ''),
-        'info': info,
-        'audio_only': True
-    }
+    # Validate URL
+    if not url.startswith(('http://', 'https://')):
+        await update.message.reply_text("❌ Please send a valid URL starting with http:// or https://")
+        return
     
-    # Create audio format options
+    # Check if URL is from blocked sites
+    blacklisted_domains = ['porn', 'xxx', 'adult']
+    if any(domain in url.lower() for domain in blacklisted_domains):
+        await update.message.reply_text("❌ This content is not supported.")
+        return
+    
+    # Check if it's YouTube
+    is_youtube = 'youtube.com' in url or 'youtu.be' in url
+    
+    # Show processing message
+    processing_msg = await update.message.reply_text("🔍 Analyzing link...")
+    
+    try:
+        # Extract video info
+        info = await extract_info(url)
+        
+        if not info:
+            await processing_msg.edit_text("❌ Could not extract information from this link.")
+            return
+        
+        # Store info in user session
+        user_session = get_user_session(user_id)
+        user_session.update({
+            'url': url,
+            'info': info,
+            'is_youtube': is_youtube
+        })
+        
+        # Get available formats
+        formats = info.get('formats', [])
+        
+        if not formats:
+            await show_audio_options(update, info, processing_msg)
+            return
+        
+        # Prepare format options
+        video_formats = []
+        audio_formats = []
+        
+        for f in formats:
+            format_id = f.get('format_id')
+            ext = f.get('ext', 'unknown')
+            filesize = f.get('filesize') or f.get('filesize_approx')
+            
+            if not format_id:
+                continue
+            
+            # Video formats
+            if f.get('vcodec') != 'none':
+                height = f.get('height', 0)
+                fps = f.get('fps', 0)
+                quality = f"{height}p" if height else "Unknown"
+                if fps and fps > 30:
+                    quality += f"@{int(fps)}fps"
+                
+                # Get size in MB
+                size_mb = round(filesize / (1024 * 1024), 1) if filesize else '?'
+                
+                video_formats.append({
+                    'id': format_id,
+                    'quality': quality,
+                    'ext': ext,
+                    'size': size_mb,
+                    'vcodec': f.get('vcodec'),
+                    'acodec': f.get('acodec')
+                })
+            
+            # Audio only formats
+            elif f.get('acodec') != 'none' and f.get('vcodec') == 'none':
+                abr = f.get('abr', 0)
+                audio_quality = f"{abr}kbps" if abr else "audio"
+                size_mb = round(filesize / (1024 * 1024), 1) if filesize else '?'
+                
+                audio_formats.append({
+                    'id': format_id,
+                    'quality': audio_quality,
+                    'ext': ext,
+                    'size': size_mb,
+                    'acodec': f.get('acodec')
+                })
+        
+        # Create keyboard
+        keyboard = []
+        
+        # Add video options (limit to avoid too many buttons)
+        if video_formats:
+            keyboard.append([InlineKeyboardButton("📹 Video Formats", callback_data='header_video')])
+            
+            # Group similar qualities
+            quality_groups = {}
+            for fmt in video_formats:
+                quality = fmt['quality']
+                if quality not in quality_groups or fmt['size'] > quality_groups[quality].get('size', 0):
+                    quality_groups[quality] = fmt
+            
+            # Show a selection of qualities (low, medium, high)
+            selected_formats = []
+            for quality in ['144p', '240p', '360p', '480p', '720p', '1080p', '1440p', '2160p']:
+                if quality in quality_groups:
+                    selected_formats.append(quality_groups[quality])
+            
+            # If no standard qualities found, take first few
+            if not selected_formats:
+                selected_formats = list(quality_groups.values())[:4]
+            
+            for fmt in selected_formats[:6]:  # Limit to 6 formats
+                text = f"🎬 {fmt['quality']} ({fmt['ext'].upper()})"
+                if fmt['size'] != '?':
+                    text += f" [{fmt['size']}MB]"
+                keyboard.append([InlineKeyboardButton(text, callback_data=f"v_{fmt['id']}")])
+        
+        # Add audio options
+        if audio_formats:
+            keyboard.append([InlineKeyboardButton("🎵 Audio Only", callback_data='header_audio')])
+            for fmt in audio_formats[:3]:  # Limit to 3 audio formats
+                text = f"🎵 {fmt['quality']} ({fmt['ext'].upper()})"
+                if fmt['size'] != '?':
+                    text += f" [{fmt['size']}MB]"
+                keyboard.append([InlineKeyboardButton(text, callback_data=f"a_{fmt['id']}")])
+        
+        # Add best quality options with warning for YouTube
+        if is_youtube:
+            keyboard.append([InlineKeyboardButton("🏆 Try Best Quality (May Fail)", callback_data='best')])
+            keyboard.append([InlineKeyboardButton("⚡ Safe: Low Quality (Usually Works)", callback_data='worst')])
+        else:
+            keyboard.append([InlineKeyboardButton("🏆 Best Quality", callback_data='best')])
+            keyboard.append([InlineKeyboardButton("⚡ Fastest (Lowest Quality)", callback_data='worst')])
+        
+        # Add YouTube-specific help button
+        if is_youtube:
+            keyboard.append([InlineKeyboardButton("❓ YouTube Help", callback_data='youtube_help')])
+        
+        # Add cancel button
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data='cancel')])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Prepare message with YouTube warning if needed
+        title = info.get('title', 'Unknown Title')[:100]
+        duration = info.get('duration', 0)
+        if duration:
+            duration_str = f"{duration // 60}:{duration % 60:02d}"
+        else:
+            duration_str = "Unknown"
+        
+        message = f"🎬 **{title}**\n⏱ Duration: {duration_str}\n\n"
+        
+        if is_youtube:
+            message += "⚠️ **YouTube Note:** Some videos may require login. If download fails, try 'Low Quality' option.\n\n"
+        
+        message += "👇 **Select a format:**"
+        
+        await processing_msg.edit_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+        
+    except Exception as e:
+        error_type = str(e)
+        
+        if error_type == "youtube_bot_detection":
+            error_message = (
+                "❌ **YouTube Bot Detection**\n\n"
+                "YouTube is asking to 'Sign in to confirm you're not a bot'.\n\n"
+                "**Solutions:**\n"
+                "1. Try the 'Low Quality' option (often works)\n"
+                "2. Try again later\n"
+                "3. Use /cookies command for more info\n"
+                "4. Try downloading from another site if available"
+            )
+            keyboard = [
+                [InlineKeyboardButton("⚡ Try Low Quality Anyway", callback_data='worst')],
+                [InlineKeyboardButton("📚 YouTube Help", callback_data='youtube_help')],
+                [InlineKeyboardButton("❌ Cancel", callback_data='cancel')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await processing_msg.edit_text(error_message, reply_markup=reply_markup, parse_mode='Markdown')
+        
+        elif error_type == "youtube_private":
+            await processing_msg.edit_text("❌ This YouTube video is private.")
+        
+        elif error_type == "youtube_members_only":
+            await processing_msg.edit_text("❌ This YouTube video is for members only.")
+        
+        elif error_type == "youtube_age_restricted":
+            await processing_msg.edit_text("❌ This YouTube video is age-restricted. Please login on YouTube to watch.")
+        
+        else:
+            logger.error(f"Error processing URL: {e}")
+            await processing_msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+async def show_audio_options(update: Update, info: Dict, message):
+    """Show audio format options"""
     keyboard = [
         [InlineKeyboardButton("🎵 MP3 (Best Quality)", callback_data="audio_mp3_best")],
         [InlineKeyboardButton("🎵 MP3 (128kbps)", callback_data="audio_mp3_128")],
-        [InlineKeyboardButton("🎵 MP3 (64kbps)", callback_data="audio_mp3_64")],
         [InlineKeyboardButton("🎵 M4A/AAC", callback_data="audio_m4a")],
         [InlineKeyboardButton("🎵 Opus", callback_data="audio_opus")],
         [InlineKeyboardButton("❌ Cancel", callback_data='cancel')]
@@ -259,11 +382,105 @@ async def show_audio_options(update: Update, context: ContextTypes.DEFAULT_TYPE,
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     title = info.get('title', 'Audio Content')[:100]
-    message = f"🎵 **{title}**\n\nSelect audio format:"
+    message_text = f"🎵 **{title}**\n\nSelect audio format:"
     
-    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    await message.edit_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-# Handle button callbacks
+async def download_file(url: str, format_spec: str, temp_dir: str, is_youtube: bool = False) -> List[str]:
+    """Download file using yt-dlp with anti-bot measures"""
+    import random
+    
+    ydl_opts = {
+        'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'progress_hooks': [],
+        'user_agent': random.choice(USER_AGENTS),
+        'retries': 3,
+        'fragment_retries': 3,
+        'skip_unavailable_fragments': True,
+    }
+    
+    # For YouTube, use conservative settings to avoid bot detection
+    if is_youtube:
+        ydl_opts.update({
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android'],
+                    'skip': ['hls', 'dash'],
+                }
+            },
+            'throttled_rate': '100K',  # Limit download speed
+        })
+    
+    if format_spec == 'best':
+        if is_youtube:
+            # For YouTube, don't use 'best' as it often triggers bot detection
+            ydl_opts['format'] = 'bv[height<=720]+ba/b[height<=720]'
+        else:
+            ydl_opts['format'] = 'best'
+    elif format_spec == 'worst':
+        ydl_opts['format'] = 'worst'
+    elif format_spec == 'youtube_help':
+        raise Exception("youtube_help_clicked")
+    elif format_spec.startswith('v_'):
+        ydl_opts['format'] = format_spec[2:]
+    elif format_spec.startswith('a_'):
+        ydl_opts['format'] = format_spec[2:]
+    elif format_spec == 'audio_mp3_best':
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        })
+    elif format_spec == 'audio_mp3_128':
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '128',
+            }],
+        })
+    elif format_spec == 'audio_m4a':
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'm4a',
+            }],
+        })
+    elif format_spec == 'audio_opus':
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'opus',
+            }],
+        })
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        if "Sign in to confirm" in error_msg:
+            raise Exception("youtube_bot_detection_download")
+        else:
+            raise
+    
+    # Find downloaded files
+    downloaded_files = []
+    for root, dirs, files in os.walk(temp_dir):
+        for file in files:
+            if file.endswith(('.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.opus', '.aac', '.flac', '.wav')):
+                downloaded_files.append(os.path.join(root, file))
+    
+    return downloaded_files
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -277,155 +494,126 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ Operation cancelled.")
         return
     
-    if user_id not in user_sessions:
+    if data == 'youtube_help':
+        help_text = (
+            "🆘 **YouTube Download Help**\n\n"
+            "**Common Issues:**\n"
+            "1. **'Sign in to confirm you're not a bot'** - YouTube bot detection\n"
+            "2. **Age-restricted content** - Requires YouTube login\n"
+            "3. **Private/Members-only videos** - Cannot be downloaded\n\n"
+            "**Solutions:**\n"
+            "✅ Try 'Low Quality' option (often bypasses detection)\n"
+            "✅ Try again in a few hours\n"
+            "✅ Use alternative video sites if available\n"
+            "❌ Browser cookies cannot be used on server\n\n"
+            "**Why this happens:**\n"
+            "YouTube detects automated downloads and may block them.\n"
+            "This is a limitation of server-based downloaders."
+        )
+        await query.edit_message_text(help_text, parse_mode='Markdown')
+        return
+    
+    user_session = get_user_session(user_id)
+    if 'url' not in user_session:
         await query.edit_message_text("❌ Session expired. Please send the URL again.")
         return
     
-    # Get user session
-    session = user_sessions[user_id]
-    url = session['url']
-    info = session.get('info', {})
+    url = user_session['url']
+    info = user_session.get('info', {})
+    is_youtube = user_session.get('is_youtube', False)
     
     # Create temp directory
     temp_dir = tempfile.mkdtemp()
     
     try:
-        # Update message to show processing
-        await query.edit_message_text("⏬ Downloading... This may take a while.")
-        
-        ydl_opts = {
-            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'progress_hooks': [lambda d: None],
-        }
-        
-        # Configure based on selection
-        if data.startswith('v_'):
-            # Video download
-            format_id = data[2:]
-            ydl_opts['format'] = format_id
-        elif data.startswith('a_'):
-            # Audio-only download from video
-            format_id = data[2:]
-            ydl_opts['format'] = format_id
-        elif data == 'audio_mp3_best':
-            # Convert to MP3 with best quality
-            ydl_opts.update({
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'prefer_ffmpeg': True,
-            })
-        elif data == 'audio_mp3_128':
-            ydl_opts.update({
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '128',
-                }],
-                'prefer_ffmpeg': True,
-            })
-        elif data == 'audio_mp3_64':
-            ydl_opts.update({
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '64',
-                }],
-                'prefer_ffmpeg': True,
-            })
-        elif data == 'audio_m4a':
-            ydl_opts.update({
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'm4a',
-                }],
-                'prefer_ffmpeg': True,
-            })
-        elif data == 'audio_opus':
-            ydl_opts.update({
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'opus',
-                }],
-                'prefer_ffmpeg': True,
-            })
+        # Update message to show downloading
+        await query.edit_message_text("⏬ Downloading... Please wait.")
         
         # Download the file
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        
-        # Find downloaded file
-        downloaded_files = []
-        for root, dirs, files in os.walk(temp_dir):
-            for file in files:
-                if file.endswith(('.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.opus', '.aac', '.flac', '.wav')):
-                    downloaded_files.append(os.path.join(root, file))
+        downloaded_files = await download_file(url, data, temp_dir, is_youtube)
         
         if not downloaded_files:
             await query.edit_message_text("❌ No file was downloaded.")
             return
         
-        # Send the file to user
+        # Send files to user
         for file_path in downloaded_files:
             file_size = os.path.getsize(file_path)
+            file_name = os.path.basename(file_path)
             
-            # Check file size (Telegram limit: 2GB for premium, 50MB for free)
-            if file_size > 50 * 1024 * 1024:  # 50MB limit for free users
+            # Check file size (Telegram limit: 50MB for free users)
+            if file_size > 50 * 1024 * 1024:
+                size_mb = file_size / (1024 * 1024)
                 await query.edit_message_text(
-                    f"⚠️ File too large ({file_size/(1024*1024):.1f}MB). "
+                    f"⚠️ File too large ({size_mb:.1f}MB). "
                     f"Telegram limit is 50MB for free users.\n"
                     f"Try selecting a lower quality format."
                 )
                 continue
             
-            # Determine file type
+            # Determine file type and send
             ext = os.path.splitext(file_path)[1].lower()
-            if ext in ['.mp3', '.m4a', '.opus', '.aac', '.flac', '.wav']:
-                await context.bot.send_audio(
-                    chat_id=query.message.chat_id,
-                    audio=open(file_path, 'rb'),
-                    caption=f"🎵 {os.path.basename(file_path)}",
-                    title=info.get('title', 'Downloaded Audio')[:64],
-                    performer=info.get('uploader', 'Unknown')[:64],
-                    reply_to_message_id=query.message.message_id
-                )
-            else:
-                await context.bot.send_video(
-                    chat_id=query.message.chat_id,
-                    video=open(file_path, 'rb'),
-                    caption=f"🎬 {os.path.basename(file_path)}",
-                    supports_streaming=True,
-                    reply_to_message_id=query.message.message_id
-                )
+            
+            with open(file_path, 'rb') as file:
+                if ext in ['.mp3', '.m4a', '.opus', '.aac', '.flac', '.wav']:
+                    await context.bot.send_audio(
+                        chat_id=query.message.chat_id,
+                        audio=file,
+                        caption=f"🎵 {file_name}",
+                        title=info.get('title', 'Downloaded Audio')[:64],
+                        performer=info.get('uploader', 'Unknown')[:64],
+                    )
+                else:
+                    await context.bot.send_video(
+                        chat_id=query.message.chat_id,
+                        video=file,
+                        caption=f"🎬 {file_name}",
+                        supports_streaming=True,
+                    )
         
-        # Clean up
-        await query.edit_message_text("✅ Download complete!")
+        await query.edit_message_text("✅ Download complete! 🎉")
         
     except Exception as e:
-        logger.error(f"Download error: {e}")
-        await query.edit_message_text(f"❌ Download failed: {str(e)[:200]}")
+        error_type = str(e)
+        
+        if error_type == "youtube_bot_detection_download":
+            error_message = (
+                "❌ **YouTube Bot Detection During Download**\n\n"
+                "YouTube blocked the download.\n\n"
+                "**Try this:**\n"
+                "1. Select 'Low Quality' option (most likely to work)\n"
+                "2. Wait a few hours and try again\n"
+                "3. The video might be temporarily blocked\n\n"
+                "**Note:** This is a YouTube limitation, not a bot issue."
+            )
+            keyboard = [
+                [InlineKeyboardButton("⚡ Try Low Quality", callback_data='worst')],
+                [InlineKeyboardButton("🔄 Send Link Again", callback_data='retry')],
+                [InlineKeyboardButton("❌ Cancel", callback_data='cancel')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(error_message, reply_markup=reply_markup, parse_mode='Markdown')
+        
+        elif error_type == "youtube_help_clicked":
+            # Already handled above
+            pass
+        
+        else:
+            logger.error(f"Download error: {e}")
+            error_msg = str(e)[:200]
+            await query.edit_message_text(f"❌ Download failed: {error_msg}")
     
     finally:
         # Clean up temp directory
         try:
             shutil.rmtree(temp_dir)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error cleaning temp dir: {e}")
         
-        # Clear user session
-        if user_id in user_sessions:
+        # Clear user session (unless we're showing retry options)
+        if user_id in user_sessions and data not in ['youtube_help', 'retry']:
             del user_sessions[user_id]
 
-# Error handler
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     
@@ -434,7 +622,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ An unexpected error occurred. Please try again."
         )
 
-# Main function
 def main():
     # Create application
     application = Application.builder().token(TOKEN).build()
@@ -442,6 +629,7 @@ def main():
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("cookies", cookies_command))
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -450,27 +638,39 @@ def main():
     application.add_error_handler(error_handler)
     
     # Start the bot
-    print("🤖 Bot is starting...")
-    print("📡 Press Ctrl+C to stop")
+    logger.info("🤖 Bot is starting...")
+    logger.info("📡 Press Ctrl+C to stop")
     
-    # For Render deployment
-    port = int(os.environ.get('PORT', 10000))
+    # Check if running on Render
+    is_render = 'RENDER' in os.environ
     
-    if 'RENDER' in os.environ:
+    if is_render:
         # Use webhook for Render
-        webhook_url = os.environ.get('RENDER_EXTERNAL_URL')
-        if webhook_url:
-            application.run_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path=TOKEN,
-                webhook_url=f"{webhook_url}/{TOKEN}"
-            )
-        else:
-            application.run_polling()
+        logger.info("🚀 Running in Render mode")
+        port = int(os.environ.get('PORT', 8443))
+        
+        async def post_init(application: Application):
+            webhook_url = os.environ.get('RENDER_EXTERNAL_URL', '')
+            if webhook_url:
+                webhook_url = f"{webhook_url}/{TOKEN}"
+                await application.bot.set_webhook(webhook_url)
+                logger.info(f"Webhook set to: {webhook_url}")
+        
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            webhook_url="",
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+            post_init=post_init
+        )
     else:
         # Use polling for local development
-        application.run_polling()
+        logger.info("💻 Running in local mode (polling)")
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
 
 if __name__ == '__main__':
     main()

@@ -657,7 +657,6 @@ def main():
                 logger.info(f"Webhook set to: {webhook_url}")
         
         application.run_webhook(
-            application.run_webhook(
                 listen="0.0.0.0",
                 port=port,
                 url_path=TOKEN,

@@ -647,7 +647,7 @@ def main():
     if is_render:
         # Use webhook for Render
         logger.info("🚀 Running in Render mode")
-        port = int(os.environ.get('PORT', 8443))
+        port = int(os.environ.get('PORT', 10000)
         
         # Get webhook URL
         webhook_url = os.environ.get('RENDER_EXTERNAL_URL')

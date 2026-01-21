@@ -18,8 +18,8 @@ A Telegram bot that downloads audio/video from various platforms using yt-dlp.
 ### 2. Local Development
 ```bash
 # Clone and navigate to project
-git clone <your-repo>
-cd telegram-ytdlp-bot
+git clone https://github.com/sinharzs2k26/ytdlp-telegram-bot.git
+cd ytdlp-telegram-bot
 
 # Install dependencies
 pip install -r requirements.txt

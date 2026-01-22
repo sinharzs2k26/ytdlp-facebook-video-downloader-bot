@@ -72,6 +72,30 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Operation cancelled.")
 
 # Handle URL messages
+# Add these alternative Instagram download sites
+INSTAGRAM_ALTERNATIVES = {
+    'saveig.app': f'https://saveig.app/api/ajaxSearch',
+    'snaptik.app': f'https://snaptik.app/abc.php',
+    'ssstik.io': f'https://ssstik.io/abc',
+}
+
+async def try_instagram_alternative(url: str):
+    """Try alternative Instagram download sites"""
+    import requests
+    
+    for site, api_url in INSTAGRAM_ALTERNATIVES.items():
+        try:
+            # Send request to alternative site
+            response = requests.post(api_url, data={'url': url}, timeout=10)
+            if response.status_code == 200:
+                # Parse response and get download link
+                # This would need site-specific parsing
+                return f"Try downloading from: {site}"
+        except:
+            continue
+    
+    return None
+
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     user_id = update.effective_user.id

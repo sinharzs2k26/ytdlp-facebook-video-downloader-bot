@@ -1,6 +1,0 @@
-.env
-*.pyc
-__pycache__/
-*.log
-temp/
-.DS_Store

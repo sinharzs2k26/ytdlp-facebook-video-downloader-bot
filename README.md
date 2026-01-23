@@ -1,4 +1,4 @@
-# Telegram YT-DLP Bot
+# YT-DLP Telegram Bot
 
 A Telegram bot that downloads audio/video from various platforms using yt-dlp.
 

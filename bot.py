@@ -529,10 +529,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_session = get_user_session(user_id)
-    if 'url' not in user_session:
-        await query.edit_message_text("❌ Session expired. Please send the URL again.")
-        return
-    
     url = user_session['url']
     info = user_session.get('info', {})
     is_youtube = user_session.get('is_youtube', False)

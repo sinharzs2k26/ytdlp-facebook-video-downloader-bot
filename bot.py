@@ -50,38 +50,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_message = (
         f"👋 Hello {user.first_name}!\n\n"
-        "🎬 I can download audio/video from various platforms.\n\n"
+        "🎬 I can download audio/video from Facebook\n\n"
         "📝 **How to use:**\n"
-        "1. Send me a link (YouTube, Instagram, TikTok, etc.)\n"
+        "1. Send me a link of Facebook video\n"
         "2. I'll show available formats\n"
         "3. Choose your preferred quality\n\n"
-        "⚠️ **Note about YouTube:**\n"
-        "• Some YouTube videos may require login\n"
-        "• Use /cookies command if you have login issues\n\n"
         "⚙️ Commands:\n"
         "/start - Show this message\n"
         "/help - Get help\n"
-        "/cookies - Info about YouTube login issues\n"
         "/cancel - Cancel current operation"
     )
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
-
-# Cookies info command
-async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cookies_info = (
-        "🍪 **YouTube Login/Cookies Issue**\n\n"
-        "Some YouTube videos require login or show 'Sign in to confirm you're not a bot'.\n\n"
-        "**Solutions:**\n"
-        "1. **Try again later** - Sometimes it's temporary\n"
-        "2. **Use different quality** - Lower qualities often work\n"
-        "3. **Try another video** - Not all videos have this issue\n"
-        "4. **Use alternative sites** - Many videos are on multiple platforms\n\n"
-        "**For developers:**\n"
-        "You can use cookies with yt-dlp using:\n"
-        "`--cookies-from-browser chrome`\n\n"
-        "**Note:** This bot runs on a server and cannot use browser cookies."
-    )
-    await update.message.reply_text(cookies_info, parse_mode='Markdown')
 
 # Help command
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,12 +73,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Large files may take time to upload\n"
         "• Some sites have download restrictions\n"
         "• Maximum file size: 50MB (Telegram free limit)\n"
-        "• YouTube may block some videos (use /cookies for info)\n\n"
-        "❓ **Having issues?**\n"
-        "• Make sure the link is accessible\n"
-        "• Try different quality options\n"
-        "• Some videos may be age-restricted\n"
-        "• Try the 'Fastest (Lowest Quality)' option"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
